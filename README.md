@@ -1,7 +1,8 @@
 # zep-mcp
 
 Minimal MCP server for [Zep Cloud](https://www.getzep.com/) -- exposes a
-temporal knowledge graph as two tools: `add_memory` and `search_memory`.
+temporal knowledge graph as three tools: `add_memory`, `search_memory`, and
+`list_memory`.
 
 Zep Cloud is built on [Graphiti](https://github.com/getzep/graphiti), an
 open-source temporal knowledge graph framework. Unlike flat memory stores,
@@ -16,15 +17,17 @@ over time (valid/invalid timestamps), and supports hybrid search (semantic
 | Tool | Description |
 |------|-------------|
 | `add_memory(content)` | Add text to the knowledge graph. Zep extracts entities and relationships automatically. |
-| `search_memory(query, limit=10)` | Hybrid search across the graph. Returns facts with temporal validity ranges. |
-
-That's it. No list, no delete, no graph wipe -- the model gets the minimum
-viable surface to store and retrieve facts.
+| `search_memory(query, limit=10)` | Graph-informed search. Returns full episode text ranked by hybrid relevance (semantic + keyword + KG traversal). |
+| `list_memory(limit=50)` | List recent memories (episodes) without a specific query. For "what do you know about me?" |
 
 ## Setup
 
 ```bash
-git clone git@github.com:klutometis/zep-mcp.git
+# Install as a tool (recommended)
+uv tool install "git+https://github.com/klutometis/zep-mcp.git"
+
+# Or clone for development
+git clone https://github.com/klutometis/zep-mcp.git
 cd zep-mcp
 uv sync
 ```
@@ -34,14 +37,21 @@ uv sync
 ### Standalone (stdio)
 
 ```bash
-ZEP_API_KEY=z_... ZEP_USER_ID=danenberg uv run python server.py
+ZEP_API_KEY=z_... ZEP_USER_ID=danenberg zep-mcp
+```
+
+### With uvx (no install needed)
+
+```bash
+ZEP_API_KEY=z_... ZEP_USER_ID=danenberg \
+  uvx --from "git+https://github.com/klutometis/zep-mcp.git" zep-mcp
 ```
 
 ### With MCP Inspector
 
 - Transport: **STDIO**
-- Command: `uv`
-- Args: `run --directory /path/to/zep-mcp python server.py`
+- Command: `uvx`
+- Args: `--from git+https://github.com/klutometis/zep-mcp.git zep-mcp`
 - Env: `ZEP_API_KEY`, `ZEP_USER_ID`
 
 ### With an MCP gateway / client config
@@ -49,8 +59,10 @@ ZEP_API_KEY=z_... ZEP_USER_ID=danenberg uv run python server.py
 ```json
 {
   "zep": {
-    "command": "uv",
-    "args": ["run", "--directory", "/path/to/zep-mcp", "python", "server.py"],
+    "command": "uvx",
+    "args": [
+      "--from", "git+https://github.com/klutometis/zep-mcp.git", "zep-mcp"
+    ],
     "env": {
       "ZEP_API_KEY": "z_...",
       "ZEP_USER_ID": "danenberg"
@@ -91,9 +103,9 @@ Options:
 ```
 Zep Cloud (Graphiti engine)          This server              Your client
 ┌────────────────────────┐      ┌──────────────────┐      ┌──────────────┐
-│  Temporal knowledge    │      │  server.py       │      │  Claude,     │
+│  Temporal knowledge    │      │  zep_mcp.py      │      │  Claude,     │
 │  graph: entities,      │◄────►│  (FastMCP, stdio) │◄────►│  gateway,   │
-│  relationships, facts  │      │  2 tools         │      │  Inspector   │
+│  relationships, facts  │      │  3 tools         │      │  Inspector   │
 └────────────────────────┘      └──────────────────┘      └──────────────┘
          HTTPS                         stdio
 ```

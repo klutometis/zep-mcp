@@ -9,4 +9,4 @@ dependencies = [
 ]
 
 [project.scripts]
-zep-mcp = "server:main"
+zep-mcp = "zep_mcp:main"
