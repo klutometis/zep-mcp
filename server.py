@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal Zep Cloud MCP server -- 2 tools: add_memory, search_memory."""
+"""Minimal Zep Cloud MCP server -- add_memory, search_memory, list_memory."""
 
 from __future__ import annotations
 
@@ -75,6 +75,32 @@ def search_memory(query: str, limit: int = 10) -> str:
             temporal += ")"
         lines.append(f"{i}. {fact}{temporal}")
     return "\n".join(lines) if lines else "No results found."
+
+
+@mcp.tool()
+def list_memory(limit: int = 50) -> str:
+    """List stored memories (episodes) without a specific search query.
+
+    Use when the user asks what you know about them, or to get a broad
+    overview of stored knowledge.  Returns the most recent episodes —
+    the original text stored via add_memory — which preserves full
+    context.  For targeted factual lookups, use search_memory instead.
+    """
+    episodes = client.graph.episode.get_by_user_id(
+        user_id=user_id,
+        lastn=min(limit, 1000),
+    )
+    if not episodes.episodes:
+        return "No memories stored yet."
+    lines = []
+    for i, ep in enumerate(episodes.episodes, 1):
+        content = ep.content or ""
+        if not content:
+            continue
+        created = str(ep.created_at)[:10] if ep.created_at else ""
+        prefix = f"[{created}] " if created else ""
+        lines.append(f"{i}. {prefix}{content}")
+    return "\n".join(lines) if lines else "No memories stored yet."
 
 
 if __name__ == "__main__":
