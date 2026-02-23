@@ -1,0 +1,13 @@
+[project]
+name = "zep-mcp"
+version = "0.1.0"
+description = "Minimal MCP server for Zep Cloud"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=3.0.2",
+    "zep-cloud>=3.16.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
