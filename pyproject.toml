@@ -7,7 +7,3 @@ dependencies = [
     "fastmcp>=3.0.2",
     "zep-cloud>=3.16.0",
 ]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
