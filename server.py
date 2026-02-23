@@ -46,34 +46,28 @@ def add_memory(content: str) -> str:
 
 @mcp.tool()
 def search_memory(query: str, limit: int = 10) -> str:
-    """Search the knowledge graph for relevant facts.
+    """Search the knowledge graph for relevant memories.
 
-    Returns facts (relationships between entities) that match the query.
-    Uses hybrid search (semantic + keyword + graph traversal).
+    Returns full episode text ranked by graph-informed relevance
+    (hybrid: semantic + keyword + knowledge-graph traversal).
+    Use this for targeted queries about specific topics.
     """
     results = client.graph.search(
         user_id=user_id,
         query=query,
         limit=min(limit, 50),
-        scope="edges",
+        scope="episodes",
     )
-    if not results.edges:
+    if not results.episodes:
         return "No results found."
     lines = []
-    for i, edge in enumerate(results.edges, 1):
-        fact = edge.fact or ""
-        if not fact:
+    for i, ep in enumerate(results.episodes, 1):
+        content = ep.content or ""
+        if not content:
             continue
-        valid = getattr(edge, "valid_at", None) or ""
-        invalid = getattr(edge, "invalid_at", None) or ""
-        temporal = ""
-        if valid:
-            ts = str(valid)[:10]
-            temporal = f" (valid: {ts}"
-            if invalid:
-                temporal += f" - invalid: {str(invalid)[:10]}"
-            temporal += ")"
-        lines.append(f"{i}. {fact}{temporal}")
+        created = str(ep.created_at)[:10] if ep.created_at else ""
+        prefix = f"[{created}] " if created else ""
+        lines.append(f"{i}. {prefix}{content}")
     return "\n".join(lines) if lines else "No results found."
 
 
