@@ -97,5 +97,10 @@ def list_memory(limit: int = 50) -> str:
     return "\n".join(lines) if lines else "No memories stored yet."
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for console_scripts."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

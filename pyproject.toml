@@ -7,3 +7,6 @@ dependencies = [
     "fastmcp>=3.0.2",
     "zep-cloud>=3.16.0",
 ]
+
+[project.scripts]
+zep-mcp = "server:main"
