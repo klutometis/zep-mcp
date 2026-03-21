@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -45,30 +46,37 @@ def add_memory(content: str) -> str:
 
 
 @mcp.tool()
-def search_memory(query: str, limit: int = 10) -> str:
-    """Search the knowledge graph for relevant memories.
+def search_memory(query: str, limit: int = 5) -> str:
+    """Search the knowledge graph for relevant facts and relationships.
 
-    Returns full episode text ranked by graph-informed relevance
-    (hybrid: semantic + keyword + knowledge-graph traversal).
-    Use this for targeted queries about specific topics.
+    Returns extracted facts ranked by cross-encoder relevance scoring.
+    Each result includes a relevance score [0,1] for thresholding.
+    Use this for targeted recall about specific topics.
     """
     results = client.graph.search(
         user_id=user_id,
         query=query,
         limit=min(limit, 50),
-        scope="episodes",
+        scope="edges",
+        reranker="cross_encoder",
     )
-    if not results.episodes:
-        return "No results found."
-    lines = []
-    for i, ep in enumerate(results.episodes, 1):
-        content = ep.content or ""
-        if not content:
+    if not results.edges:
+        return "[]"
+    items = []
+    for edge in results.edges:
+        fact = edge.fact or ""
+        if not fact:
             continue
-        created = str(ep.created_at)[:10] if ep.created_at else ""
-        prefix = f"[{created}] " if created else ""
-        lines.append(f"{i}. {prefix}{content}")
-    return "\n".join(lines) if lines else "No results found."
+        items.append(
+            {
+                "text": fact,
+                "relevance": edge.relevance
+                if edge.relevance is not None
+                else edge.score,
+                "created_at": str(edge.created_at)[:10] if edge.created_at else "",
+            }
+        )
+    return json.dumps(items) if items else "[]"
 
 
 @mcp.tool()
