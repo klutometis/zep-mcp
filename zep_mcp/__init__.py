@@ -19,7 +19,9 @@ if not api_key:
     sys.exit(1)
 
 DEFAULT_USER_ID = os.environ.get("ZEP_USER_ID", "default")
-IDENTITY_HEADER = os.environ.get("ZEP_IDENTITY_HEADER", "X-Spark-Group-Id")
+# Identity arrives as W3C baggage (baggage: <key>=<value>); see the gateway's
+# notes/identity-propagation.md. Key is configurable for genericity.
+BAGGAGE_KEY = os.environ.get("ZEP_BAGGAGE_KEY", "userId")
 client = Zep(api_key=api_key)
 
 # Users we've ensured exist this process (idempotent guard, per tenant).
@@ -37,20 +39,29 @@ def _ensure_user(uid: str) -> None:
 
 
 def current_user_id() -> str:
-    """Resolve the caller's Zep user id.
+    """Resolve the caller's Zep user id from forwarded W3C baggage.
 
-    Multi-tenant: read the identity header the gateway forwards per
-    request. Falls back to ZEP_USER_ID for the single-tenant (stdio /
-    personal) deployment — same code path, N=1 is just one id inserted.
-    There is no single-tenant special case.
+    Multi-tenant: parse ``baggage: <BAGGAGE_KEY>=<value>`` (stamped per
+    request by the gateway) and percent-decode it. Falls back to
+    ZEP_USER_ID for the single-tenant (stdio / personal) deployment —
+    same code path, N=1 is just one id ever flowing through. There is no
+    single-tenant special case.
     """
     try:
+        from urllib.parse import unquote
+
         from fastmcp.server.dependencies import get_http_headers
 
         headers = get_http_headers() or {}
-        for k, v in headers.items():
-            if k.lower() == IDENTITY_HEADER.lower() and v:
-                return v
+        baggage = next(
+            (v for k, v in headers.items() if k.lower() == "baggage"), ""
+        )
+        for member in baggage.split(","):
+            key, _, val = member.strip().partition("=")
+            if key.strip() == BAGGAGE_KEY:
+                val = val.split(";", 1)[0].strip()  # drop any baggage properties
+                if val:
+                    return unquote(val)
     except Exception:
         pass
     return DEFAULT_USER_ID
