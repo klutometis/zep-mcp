@@ -9,10 +9,10 @@ description = "Minimal MCP server for Zep Cloud"
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=3.0.2",
-    # <4: zep-cloud 4.0.0 (Oct 2026) moved graph.add → graph.episode.add and
-    # graph.search → graph.search_edges, and an unpinned uvx install on the
-    # gateway's next restart broke save_memory/search_memory. Port, then lift.
-    "zep-cloud>=3.16.0,<4",
+    # 4.x: graphs are addressed by graph_uuid (user.lookup → .graph_uuid),
+    # graph.episode.add / graph.search_edges / graph.episode.list. Bounded <5
+    # because the last unbounded major bump broke every deployment on restart.
+    "zep-cloud>=4.0.0,<5",
 ]
 
 [project.scripts]

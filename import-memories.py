@@ -22,17 +22,29 @@ import sys
 import time
 
 from zep_cloud.client import Zep
+from zep_cloud.errors import NotFoundError
 
 MAX_RETRIES = 5
 INITIAL_BACKOFF = 2.0  # seconds
 
 
-def add_with_retry(client, user_id: str, content: str, index: int) -> str:
+def graph_of(client, user_id: str) -> str:
+    """zep-cloud 4 addresses memory by graph uuid; a user owns one graph."""
+    try:
+        user = client.user.lookup(user_id=user_id)
+    except NotFoundError:
+        user = client.user.create(user_id=user_id)
+    if not user.graph_uuid:
+        user = client.user.lookup(user_id=user_id)
+    return user.graph_uuid
+
+
+def add_with_retry(client, graph_uuid: str, content: str, index: int) -> str:
     """Add memory with exponential backoff on rate-limit/transient errors."""
     for attempt in range(MAX_RETRIES):
         try:
-            result = client.graph.add(user_id=user_id, type="text", data=content)
-            return result.uuid_
+            result = client.graph.episode.add(graph_uuid, type="text", data=content)
+            return result.episode.uuid_
         except Exception as e:
             status = getattr(e, "status_code", None)
             body = getattr(e, "body", None)
@@ -80,17 +92,11 @@ def main():
     if args.nuke:
         print(f"Nuking user '{args.user_id}'...")
         try:
-            client.user.delete(args.user_id)
-        except Exception:
+            client.user.delete(client.user.lookup(user_id=args.user_id).uuid_)
+        except NotFoundError:
             pass
-        client.user.add(user_id=args.user_id)
         print("Clean slate.")
-    else:
-        # Ensure user exists
-        try:
-            client.user.add(user_id=args.user_id)
-        except Exception:
-            pass
+    graph_uuid = graph_of(client, args.user_id)   # creates the user if needed
 
     if args.resume > 0:
         print(
@@ -109,7 +115,7 @@ def main():
             skipped += 1
             continue
         try:
-            add_with_retry(client, args.user_id, content, index=i + args.resume)
+            add_with_retry(client, graph_uuid, content, index=i + args.resume)
             succeeded += 1
         except Exception as e:
             failed += 1

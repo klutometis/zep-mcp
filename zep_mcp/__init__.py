@@ -10,6 +10,7 @@ import sys
 
 from fastmcp import FastMCP
 from zep_cloud.client import Zep
+from zep_cloud.errors import NotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -24,18 +25,27 @@ DEFAULT_USER_ID = os.environ.get("ZEP_USER_ID", "default")
 BAGGAGE_KEY = os.environ.get("ZEP_BAGGAGE_KEY", "userId")
 client = Zep(api_key=api_key)
 
-# Users we've ensured exist this process (idempotent guard, per tenant).
-_ensured_users: set[str] = set()
+# zep-cloud 4 addresses a user's memory by the *graph* it owns, not by user id:
+# every graph call takes a graph_uuid. Resolve user id -> graph uuid once per
+# process and tenant (creating the user on first sight, as v3's user.add did).
+_graph_of: dict[str, str] = {}
 
 
-def _ensure_user(uid: str) -> None:
-    if uid in _ensured_users:
-        return
+def _graph_uuid(uid: str) -> str:
+    g = _graph_of.get(uid)
+    if g:
+        return g
     try:
-        client.user.add(user_id=uid)
-    except Exception:
-        pass
-    _ensured_users.add(uid)
+        user = client.user.lookup(user_id=uid)
+    except NotFoundError:
+        user = client.user.create(user_id=uid)
+    if not user.graph_uuid:
+        # A user's graph is provisioned with the user; a fresh one can lag.
+        user = client.user.lookup(user_id=uid)
+    if not user.graph_uuid:
+        raise RuntimeError(f"Zep user {uid!r} has no graph yet")
+    _graph_of[uid] = user.graph_uuid
+    return user.graph_uuid
 
 
 def current_user_id() -> str:
@@ -77,14 +87,12 @@ def add_memory(content: str) -> str:
     Use this to store facts, preferences, and information about the user
     that should be remembered across conversations.
     """
-    uid = current_user_id()
-    _ensure_user(uid)
-    result = client.graph.add(
-        user_id=uid,
+    result = client.graph.episode.add(
+        _graph_uuid(current_user_id()),
         type="text",
         data=content,
     )
-    return f"Stored (episode {result.uuid_})"
+    return f"Stored (episode {result.episode.uuid_})"
 
 
 @mcp.tool()
@@ -95,19 +103,17 @@ def search_memory(query: str, limit: int = 5) -> str:
     Each result includes a relevance score [0,1] for thresholding.
     Use this for targeted recall about specific topics.
     """
-    uid = current_user_id()
-    _ensure_user(uid)
-    results = client.graph.search(
-        user_id=uid,
+    # A pager: .items is the first page, which with page_size=N is the top N.
+    page = client.graph.search_edges(
+        _graph_uuid(current_user_id()),
         query=query,
-        limit=min(limit, 50),
-        scope="edges",
+        page_size=max(1, min(limit, 50)),
         reranker="cross_encoder",
     )
-    if not results.edges:
+    if not page.items:
         return "[]"
     items = []
-    for edge in results.edges:
+    for edge in page.items:
         fact = edge.fact or ""
         if not fact:
             continue
@@ -132,16 +138,16 @@ def list_memory(limit: int = 50) -> str:
     the original text stored via add_memory — which preserves full
     context.  For targeted factual lookups, use search_memory instead.
     """
-    uid = current_user_id()
-    _ensure_user(uid)
-    episodes = client.graph.episode.get_by_user_id(
-        user_id=uid,
-        lastn=min(limit, 1000),
+    page = client.graph.episode.list(
+        _graph_uuid(current_user_id()),
+        page_size=max(1, min(limit, 100)),
+        order_by="created_at",
+        order="desc",
     )
-    if not episodes.episodes:
+    if not page.items:
         return "No memories stored yet."
     lines = []
-    for i, ep in enumerate(episodes.episodes, 1):
+    for i, ep in enumerate(page.items, 1):
         content = ep.content or ""
         if not content:
             continue
