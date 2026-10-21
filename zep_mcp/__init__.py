@@ -12,6 +12,8 @@ from fastmcp import FastMCP
 from zep_cloud.client import Zep
 from zep_cloud.errors import NotFoundError
 
+from zep_mcp.diverse import fetch_size, pick_diverse
+
 logger = logging.getLogger(__name__)
 
 api_key = os.environ.get("ZEP_API_KEY")
@@ -99,24 +101,28 @@ def add_memory(content: str) -> str:
 def search_memory(query: str, limit: int = 5) -> str:
     """Search the knowledge graph for relevant facts and relationships.
 
-    Returns extracted facts ranked by cross-encoder relevance scoring.
+    Returns extracted facts ranked by cross-encoder relevance scoring, with
+    near-duplicate phrasings of the same fact removed.
     Each result includes a relevance score [0,1] for thresholding.
     Use this for targeted recall about specific topics.
     """
+    limit = max(1, min(limit, 50))
+    # Over-fetch, then keep the first `limit` facts that are not rewordings
+    # of one already kept: memory holds many phrasings of the same fact, and
+    # the cross-encoder scores them all ~1.0. See zep_mcp/diverse.py.
     # A pager: .items is the first page, which with page_size=N is the top N.
     page = client.graph.search_edges(
         _graph_uuid(current_user_id()),
         query=query,
-        page_size=max(1, min(limit, 50)),
+        page_size=fetch_size(limit),
         reranker="cross_encoder",
     )
     if not page.items:
         return "[]"
+    edges = [e for e in page.items if e.fact]
     items = []
-    for edge in page.items:
-        fact = edge.fact or ""
-        if not fact:
-            continue
+    for edge in pick_diverse(edges, limit, text=lambda e: e.fact):
+        fact = edge.fact
         items.append(
             {
                 "text": fact,
