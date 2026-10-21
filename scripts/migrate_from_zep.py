@@ -96,6 +96,17 @@ def export(args) -> None:
     print(json.dumps(meta))
 
 
+# ── exclude ──────────────────────────────────────────────────────────────
+
+
+def exclude(args) -> None:
+    from zep_mcp.store import Store
+
+    store = Store(os.environ["MEMORY_DATABASE_URL"], schema=args.schema)
+    store.ensure_schema()
+    print(json.dumps(store.exclude_zep_episodes(args.episode, args.reason)))
+
+
 # ── load ─────────────────────────────────────────────────────────────────
 
 
@@ -163,7 +174,14 @@ def load(args) -> None:
     )
 
     have = store.zep_uuids_present([r["zep"]["uuid"] for r in rows])
-    todo = [r for r in rows if r["zep"]["uuid"] not in have]
+    # Never embed a fact extracted from an excluded episode, including edges
+    # Zep extracted after the exclusion was recorded.
+    banned = store.excluded_episodes()
+    todo = [
+        r for r in rows
+        if r["zep"]["uuid"] not in have
+        and not banned.intersection(r["zep"].get("episode_uuids") or [])
+    ]
     print(f"{len(have)} already loaded, {len(todo)} to embed and insert", file=sys.stderr)
 
     # Embed each distinct text once; identical facts share a vector.
@@ -222,6 +240,14 @@ def load(args) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
+    x = sub.add_parser(
+        "exclude",
+        help="delete these Zep episodes and every fact extracted from them from the store, "
+        "and keep any import from bringing them back",
+    )
+    x.add_argument("--episode", action="append", required=True, help="Zep episode uuid (repeatable)")
+    x.add_argument("--reason", required=True)
+    x.add_argument("--schema", default=os.environ.get("MEMORY_SCHEMA", "memory"))
     e = sub.add_parser("export")
     e.add_argument("--user", default=os.environ.get("ZEP_USER_ID", "danenberg"))
     e.add_argument("--out", required=True)
@@ -237,7 +263,7 @@ def main() -> None:
         "for a final sync before switching backends",
     )
     a = p.parse_args()
-    {"export": export, "load": load}[a.cmd](a)
+    {"export": export, "load": load, "exclude": exclude}[a.cmd](a)
 
 
 if __name__ == "__main__":

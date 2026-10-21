@@ -124,6 +124,17 @@ CREATE TABLE IF NOT EXISTS {s}.zep_episodes (
     created_at timestamptz NOT NULL,
     zep        jsonb       NOT NULL DEFAULT '{{}}'::jsonb
 );
+
+-- Zep episodes (and the edges extracted from them) that must never be
+-- imported: the import skips them, so a rerun cannot embed them again. First
+-- use: text saved from danenberg-central, which may go to Google and nowhere
+-- else (no Voyage, no Neon), but reached Zep and then this store.
+CREATE TABLE IF NOT EXISTS {s}.zep_excluded (
+    uuid        uuid PRIMARY KEY,
+    kind        text        NOT NULL CHECK (kind IN ('episode', 'edge')),
+    reason      text        NOT NULL,
+    excluded_at timestamptz NOT NULL DEFAULT now()
+);
 """
 
 INDEX_DDL = """
@@ -481,15 +492,76 @@ class Store:
     # ── migration support ───────────────────────────────────────────────
 
     def zep_uuids_present(self, uuids: list[str]) -> set[str]:
+        """Edge uuids the import must skip: already loaded, or excluded."""
         if not uuids:
             return set()
         rows = self._run(
             lambda c: c.execute(
-                self._q("SELECT zep_uuid::text FROM {s}.memories WHERE zep_uuid = ANY(%s::uuid[])"),
-                (uuids,),
+                self._q(
+                    """
+                    SELECT zep_uuid::text FROM {s}.memories WHERE zep_uuid = ANY(%s::uuid[])
+                    UNION SELECT uuid::text FROM {s}.zep_excluded WHERE uuid = ANY(%s::uuid[])
+                    """
+                ),
+                (uuids, uuids),
             ).fetchall()
         )
         return {r[0] for r in rows}
+
+    def excluded_episodes(self) -> set[str]:
+        rows = self._run(
+            lambda c: c.execute(
+                self._q("SELECT uuid::text FROM {s}.zep_excluded WHERE kind = 'episode'")
+            ).fetchall()
+        )
+        return {r[0] for r in rows}
+
+    def exclude_zep_episodes(self, episode_uuids: list[str], reason: str) -> dict:
+        """Remove these Zep episodes, and every fact extracted from them, from
+        the store, and record them so no import brings them back.
+
+        Deletes rows (memories, their uses, the episode texts). The store has
+        no other delete path; this is for text that must not be here at all.
+        """
+
+        def tx(conn):
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    self._q(
+                        "SELECT id, zep_uuid::text FROM {s}.memories "
+                        "WHERE zep->'episode_uuids' ?| %s::text[]"
+                    ),
+                    (episode_uuids,),
+                )
+                hits = cur.fetchall()
+                ids = [h[0] for h in hits]
+                excl = [(u, "episode", reason) for u in episode_uuids] + [
+                    (h[1], "edge", reason) for h in hits if h[1]
+                ]
+                cur.executemany(
+                    self._q(
+                        "INSERT INTO {s}.zep_excluded (uuid, kind, reason) VALUES (%s, %s, %s) "
+                        "ON CONFLICT (uuid) DO NOTHING"
+                    ),
+                    excl,
+                )
+                cur.execute(
+                    self._q("UPDATE {s}.memories SET merged_into = NULL WHERE merged_into = ANY(%s)"),
+                    (ids,),
+                )
+                cur.execute(self._q("DELETE FROM {s}.memory_uses WHERE memory_id = ANY(%s)"), (ids,))
+                uses = cur.rowcount
+                cur.execute(self._q("DELETE FROM {s}.memories WHERE id = ANY(%s)"), (ids,))
+                mems = cur.rowcount
+                cur.execute(
+                    self._q("DELETE FROM {s}.zep_episodes WHERE uuid = ANY(%s::uuid[])"),
+                    (episode_uuids,),
+                )
+                eps = cur.rowcount
+            return {"memories_deleted": mems, "uses_deleted": uses, "episodes_deleted": eps,
+                    "excluded": len(excl)}
+
+        return self._run(tx)
 
     def insert_imported(self, user_id: str, rows: list[dict]) -> int:
         """Insert imported facts, each with a `saved` use at its created_at.
@@ -549,14 +621,16 @@ class Store:
         stmt = self._q(
             """
             INSERT INTO {s}.zep_episodes (uuid, user_id, content, created_at, zep)
-            VALUES (%s, %s, %s, %s, %s) ON CONFLICT (uuid) DO NOTHING
+            SELECT %s, %s, %s, %s, %s
+            WHERE NOT EXISTS (SELECT 1 FROM {s}.zep_excluded x WHERE x.uuid = %s::uuid)
+            ON CONFLICT (uuid) DO NOTHING
             """
         )
         params = []
         for e in episodes:
             u = e.get("uuid_") or e.get("uuid")
             rest = {k: v for k, v in e.items() if k not in ("uuid_", "uuid", "content", "created_at")}
-            params.append((u, user_id, e.get("content") or "", e["created_at"], Jsonb(rest)))
+            params.append((u, user_id, e.get("content") or "", e["created_at"], Jsonb(rest), u))
 
         def tx(conn):
             with conn.cursor() as cur:

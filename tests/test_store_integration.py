@@ -129,3 +129,31 @@ def test_save_survives_embedding_failure(store):
             f"SELECT embedding IS NULL FROM {store.schema}.memories WHERE id = %s", (mid,)
         ).fetchone()[0]
     assert store.search("u3", "reranker", limit=1, log=False)[0]["text"].startswith("Peter's favourite")
+
+
+def test_exclude_zep_episodes(store):
+    """Excluded episodes leave the store with their facts and stay out."""
+    ep_bad, ep_ok = str(uuid.uuid4()), str(uuid.uuid4())
+    e_bad, e_ok = str(uuid.uuid4()), str(uuid.uuid4())
+    vec, _ = store.voyage.embed(["an imported fact"], "document")
+    rows = [
+        {"text": "a fact from the barred episode", "embedding": vec[0], "created_at": "2026-10-20T00:00:00Z",
+         "zep": {"uuid": e_bad, "episode_uuids": [ep_bad]}},
+        {"text": "a fact from an ordinary episode", "embedding": vec[0], "created_at": "2026-10-20T00:00:00Z",
+         "zep": {"uuid": e_ok, "episode_uuids": [ep_ok]}},
+    ]
+    assert store.insert_imported("u-x", rows) == 2
+    eps = [{"uuid": ep_bad, "content": "barred text", "created_at": "2026-10-20T00:00:00Z"},
+           {"uuid": ep_ok, "content": "ordinary text", "created_at": "2026-10-20T00:00:00Z"}]
+    assert store.insert_zep_episodes("u-x", eps) == 2
+
+    out = store.exclude_zep_episodes([ep_bad], "test")
+    assert out == {"memories_deleted": 1, "uses_deleted": 1, "episodes_deleted": 1, "excluded": 2}
+    assert store.excluded_episodes() == {ep_bad}
+
+    # A rerun of the import treats the barred edge as present, so it is not
+    # embedded or inserted again, and the barred episode is not reinserted.
+    assert store.zep_uuids_present([e_bad, e_ok]) == {e_bad, e_ok}
+    assert store.insert_zep_episodes("u-x", eps) == 0
+    texts = {r["text"] for r in store.list("u-x", limit=10)}
+    assert texts == {"a fact from an ordinary episode"}
