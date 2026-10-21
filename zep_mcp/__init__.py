@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Minimal Zep Cloud MCP server -- add_memory, search_memory, list_memory."""
+"""Minimal memory MCP server -- add_memory, search_memory, list_memory.
+
+Two backends, chosen by ZEP_MCP_BACKEND:
+
+    zep  (default)  Zep Cloud, as before.
+    own             Our own store: Postgres + pgvector, Voyage embeddings and
+                    reranking, MMR, a use log per fact (zep_mcp/store.py).
+                    Needs MEMORY_DATABASE_URL and VOYAGE_API_KEY.
+
+The default is zep, so shipping this changes nothing until the switch is set.
+"""
 
 from __future__ import annotations
 
@@ -9,21 +19,54 @@ import os
 import sys
 
 from fastmcp import FastMCP
-from zep_cloud.client import Zep
-from zep_cloud.errors import NotFoundError
 
 logger = logging.getLogger(__name__)
 
-api_key = os.environ.get("ZEP_API_KEY")
-if not api_key:
-    print("ZEP_API_KEY required", file=sys.stderr)
+BACKEND = os.environ.get("ZEP_MCP_BACKEND", "zep").strip().lower() or "zep"
+if BACKEND not in ("zep", "own"):
+    print(f"ZEP_MCP_BACKEND must be 'zep' or 'own', not {BACKEND!r}", file=sys.stderr)
     sys.exit(1)
 
 DEFAULT_USER_ID = os.environ.get("ZEP_USER_ID", "default")
 # Identity arrives as W3C baggage (baggage: <key>=<value>); see the gateway's
 # notes/identity-propagation.md. Key is configurable for genericity.
 BAGGAGE_KEY = os.environ.get("ZEP_BAGGAGE_KEY", "userId")
-client = Zep(api_key=api_key)
+
+client = None  # the Zep client (zep backend)
+_store = None  # the own store (own backend), opened on first use
+
+if BACKEND == "zep":
+    from zep_cloud.client import Zep
+    from zep_cloud.errors import NotFoundError
+
+    api_key = os.environ.get("ZEP_API_KEY")
+    if not api_key:
+        print("ZEP_API_KEY required", file=sys.stderr)
+        sys.exit(1)
+    client = Zep(api_key=api_key)
+else:
+    missing = [k for k in ("MEMORY_DATABASE_URL", "VOYAGE_API_KEY") if not os.environ.get(k)]
+    if missing:
+        print(f"ZEP_MCP_BACKEND=own requires {', '.join(missing)}", file=sys.stderr)
+        sys.exit(1)
+
+
+def own_store():
+    """The own backend's store, connected lazily (startup stays instant).
+
+    Not named `store`: importing the submodule zep_mcp.store rebinds that
+    name on this package, and the second call would hit a module.
+    """
+    global _store
+    if _store is None:
+        from zep_mcp.store import Store
+
+        _store = Store(
+            os.environ["MEMORY_DATABASE_URL"],
+            schema=os.environ.get("MEMORY_SCHEMA", "memory"),
+        )
+    return _store
+
 
 # zep-cloud 4 addresses a user's memory by the *graph* it owns, not by user id:
 # every graph call takes a graph_uuid. Resolve user id -> graph uuid once per
@@ -49,13 +92,13 @@ def _graph_uuid(uid: str) -> str:
 
 
 def current_user_id() -> str:
-    """Resolve the caller's Zep user id from forwarded W3C baggage.
+    """Resolve the caller's user id from forwarded W3C baggage.
 
     Multi-tenant: parse ``baggage: <BAGGAGE_KEY>=<value>`` (stamped per
     request by the gateway) and percent-decode it. Falls back to
     ZEP_USER_ID for the single-tenant (stdio / personal) deployment —
     same code path, N=1 is just one id ever flowing through. There is no
-    single-tenant special case.
+    single-tenant special case. Both backends scope memory by this id.
     """
     try:
         from urllib.parse import unquote
@@ -77,37 +120,115 @@ def current_user_id() -> str:
     return DEFAULT_USER_ID
 
 
+# ── provenance (the optional `source` argument) ─────────────────────────
+
+SOURCE_DOC = """
+    `source` is optional provenance, a JSON object passed as a string, with
+    any of: app, conversation (or session), model, tools (list of tool
+    names), turn_time (ISO 8601). For example:
+    {"app": "llm-multiplex", "conversation": "…", "model": "…",
+     "tools": ["search"], "turn_time": "2026-10-21T09:15:00-07:00"}
+"""
+
+
+def zep_source_kwargs(source: str) -> dict:
+    """`source` as episode.add's source_description and metadata.
+
+    Zep's episode metadata wants flat scalar values, so lists are joined and
+    nested objects JSON-encoded.
+    """
+    from zep_mcp.source import normalize_source
+
+    src = normalize_source(source)
+    if not src:
+        return {}
+    meta = {}
+    for k, v in src.items():
+        if v is None or isinstance(v, (str, int, float, bool)):
+            meta[str(k)] = v
+        elif isinstance(v, (list, tuple)) and all(isinstance(x, (str, int, float, bool)) for x in v):
+            meta[str(k)] = ", ".join(str(x) for x in v)
+        else:
+            meta[str(k)] = json.dumps(v, ensure_ascii=False)
+    desc = "; ".join(f"{k}={v}" for k, v in meta.items() if v not in (None, ""))
+    return {"source_description": desc[:1000], "metadata": meta}
+
+
+# ── tools ────────────────────────────────────────────────────────────────
+
 mcp = FastMCP("zep-memory")
 
-
-@mcp.tool()
-def add_memory(content: str) -> str:
-    """Add information to the knowledge graph.
+if BACKEND == "zep":
+    ADD_DOC = """Add information to the knowledge graph.
 
     Use this to store facts, preferences, and information about the user
     that should be remembered across conversations.
-    """
-    result = client.graph.episode.add(
-        _graph_uuid(current_user_id()),
-        type="text",
-        data=content,
-    )
-    return f"Stored (episode {result.episode.uuid_})"
-
-
-@mcp.tool()
-def search_memory(query: str, limit: int = 5) -> str:
-    """Search the knowledge graph for relevant facts and relationships.
+    """ + SOURCE_DOC
+    SEARCH_DOC = """Search the knowledge graph for relevant facts and relationships.
 
     Returns extracted facts ranked by cross-encoder relevance scoring.
     Each result includes a relevance score [0,1] for thresholding.
     Use this for targeted recall about specific topics.
     """
+    LIST_DOC = """List stored memories (episodes) without a specific search query.
+
+    Use when the user asks what you know about them, or to get a broad
+    overview of stored knowledge.  Returns the most recent episodes —
+    the original text stored via add_memory — which preserves full
+    context.  For targeted factual lookups, use search_memory instead.
+    """
+else:
+    ADD_DOC = """Store a fact to remember across conversations.
+
+    Use this to store facts, preferences, and information about the user.
+    One concise, standalone statement per call.
+    """ + SOURCE_DOC
+    SEARCH_DOC = """Search memory for facts relevant to a query.
+
+    Returns facts ranked by reranker relevance, with near-duplicate
+    phrasings of a fact already returned left out. Each result has a
+    relevance score [0,1] for thresholding, the date it was saved
+    (created_at) and, when known, the date it became true (valid_from).
+    Use this for targeted recall about specific topics.
+    """
+    LIST_DOC = """List the most recently saved memories, newest first.
+
+    Use when the user asks what you know about them, or to get a broad
+    overview of stored knowledge. For targeted factual lookups, use
+    search_memory instead.
+    """
+
+
+@mcp.tool(description=ADD_DOC)
+def add_memory(content: str, source: str = "") -> str:
+    if BACKEND == "own":
+        mid = own_store().add(current_user_id(), content, source)
+        return f"Stored (memory {mid})"
+    graph = _graph_uuid(current_user_id())
+    extra = zep_source_kwargs(source)
+    try:
+        result = client.graph.episode.add(graph, type="text", data=content, **extra)
+    except Exception:
+        if not extra:
+            raise
+        # Provenance must never cost a save: if Zep rejects the metadata,
+        # store the text without it.
+        logger.exception("Zep rejected episode source/metadata; saving without")
+        result = client.graph.episode.add(graph, type="text", data=content)
+    return f"Stored (episode {result.episode.uuid_})"
+
+
+@mcp.tool(description=SEARCH_DOC)
+def search_memory(query: str, limit: int = 5) -> str:
+    limit = max(1, min(limit, 50))
+    if BACKEND == "own":
+        items = own_store().search(current_user_id(), query, limit=limit)
+        return json.dumps(items) if items else "[]"
     # A pager: .items is the first page, which with page_size=N is the top N.
     page = client.graph.search_edges(
         _graph_uuid(current_user_id()),
         query=query,
-        page_size=max(1, min(limit, 50)),
+        page_size=limit,
         reranker="cross_encoder",
     )
     if not page.items:
@@ -129,15 +250,13 @@ def search_memory(query: str, limit: int = 5) -> str:
     return json.dumps(items) if items else "[]"
 
 
-@mcp.tool()
+@mcp.tool(description=LIST_DOC)
 def list_memory(limit: int = 50) -> str:
-    """List stored memories (episodes) without a specific search query.
-
-    Use when the user asks what you know about them, or to get a broad
-    overview of stored knowledge.  Returns the most recent episodes —
-    the original text stored via add_memory — which preserves full
-    context.  For targeted factual lookups, use search_memory instead.
-    """
+    if BACKEND == "own":
+        rows = own_store().list(current_user_id(), limit=max(1, min(limit, 100)))
+        if not rows:
+            return "No memories stored yet."
+        return "\n".join(f"{i}. [{r['created_at']}] {r['text']}" for i, r in enumerate(rows, 1))
     page = client.graph.episode.list(
         _graph_uuid(current_user_id()),
         page_size=max(1, min(limit, 100)),

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zep-mcp"
-version = "0.1.0"
-description = "Minimal MCP server for Zep Cloud"
+version = "0.2.0"
+description = "Minimal MCP memory server: Zep Cloud, or our own Postgres + pgvector store"
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=3.0.2",
@@ -13,7 +13,20 @@ dependencies = [
     # graph.episode.add / graph.search_edges / graph.episode.list. Bounded <5
     # because the last unbounded major bump broke every deployment on restart.
     "zep-cloud>=4.0.0,<5",
+    # The own backend (ZEP_MCP_BACKEND=own): Postgres + pgvector, Voyage over HTTP.
+    "psycopg[binary]>=3.2,<4",
+    "psycopg-pool>=3.2,<4",
+    "pgvector>=0.3,<1",
+    "numpy>=1.26",
+    "httpx>=0.27",
 ]
 
 [project.scripts]
 zep-mcp = "zep_mcp:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs MEMORY_DATABASE_URL and VOYAGE_API_KEY; uses a throwaway schema"]
