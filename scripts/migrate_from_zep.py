@@ -38,18 +38,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # ── export ───────────────────────────────────────────────────────────────
 
 
-def _dump(pager, path: Path, label: str) -> int:
-    n = 0
-    t0 = time.time()
-    with path.open("w") as f:
-        for page in pager.iter_pages():
-            for item in page.items or []:
-                f.write(json.dumps(item.model_dump(mode="json", by_alias=False)) + "\n")
-                n += 1
-            if n and n % 2000 < 100:
-                print(f"  {label}: {n} ({time.time() - t0:.0f}s)", file=sys.stderr)
-    print(f"  {label}: {n} done in {time.time() - t0:.0f}s", file=sys.stderr)
-    return n
+def _dump(new_pager, path: Path, label: str, attempts: int = 5) -> int:
+    """Write every item of a listing to `path`, one JSON object per line.
+
+    Zep answers 409 `cursor_stale` when the graph changes under a listing
+    (a save during the ~2.5 min it takes to page through the edges). The only
+    recovery it allows is starting over from the first page, so do that, a
+    few times. Export after the writers have moved off Zep and it will not
+    happen at all.
+    """
+    from zep_cloud.errors import ConflictError
+
+    for attempt in range(1, attempts + 1):
+        n = 0
+        t0 = time.time()
+        try:
+            with path.open("w") as f:
+                for page in new_pager().iter_pages():
+                    for item in page.items or []:
+                        f.write(json.dumps(item.model_dump(mode="json", by_alias=False)) + "\n")
+                        n += 1
+                    if n and n % 2000 < 100:
+                        print(f"  {label}: {n} ({time.time() - t0:.0f}s)", file=sys.stderr)
+        except ConflictError as e:
+            if "cursor_stale" not in str(e) or attempt == attempts:
+                raise
+            print(f"  {label}: cursor went stale after {n}; starting over ({attempt}/{attempts})", file=sys.stderr)
+            continue
+        print(f"  {label}: {n} done in {time.time() - t0:.0f}s", file=sys.stderr)
+        return n
+    raise AssertionError("unreachable")
 
 
 def export(args) -> None:
@@ -66,7 +84,7 @@ def export(args) -> None:
         "episodes": lambda: c.graph.episode.list(g, page_size=100),
     }
     with ThreadPoolExecutor(3) as ex:
-        futs = {k: ex.submit(_dump, f(), out / f"{k}.jsonl", k) for k, f in jobs.items()}
+        futs = {k: ex.submit(_dump, f, out / f"{k}.jsonl", k) for k, f in jobs.items()}
         counts = {k: f.result() for k, f in futs.items()}
     meta = {
         "user_id": args.user,
