@@ -19,6 +19,9 @@ dependencies = [
     "pgvector>=0.3,<1",
     "numpy>=1.26",
     "httpx>=0.27",
+    # The local backend (ZEP_MCP_BACKEND=local): Vertex AI embeddings.
+    "google-genai>=1.0,<2",
+    "google-auth>=2.0,<3",
 ]
 
 [project.scripts]

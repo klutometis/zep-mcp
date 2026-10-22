@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Minimal memory MCP server -- add_memory, search_memory, list_memory.
 
-Two backends, chosen by ZEP_MCP_BACKEND:
+Three backends, chosen by ZEP_MCP_BACKEND:
 
     zep  (default)  Zep Cloud, as before.
     own             Our own store: Postgres + pgvector, Voyage embeddings and
                     reranking, MMR, a use log per fact (zep_mcp/store.py).
                     Needs MEMORY_DATABASE_URL and VOYAGE_API_KEY.
+    local           A SQLite file on this machine and Vertex AI embeddings in
+                    its own Google Cloud project: for a machine whose text
+                    may go to Google and nowhere else (zep_mcp/local_store.py).
+                    Needs MEMORY_VERTEX_PROJECT (or GOOGLE_CLOUD_PROJECT).
 
 The default is zep, so shipping this changes nothing until the switch is set.
 """
@@ -23,8 +27,8 @@ from fastmcp import FastMCP
 logger = logging.getLogger(__name__)
 
 BACKEND = os.environ.get("ZEP_MCP_BACKEND", "zep").strip().lower() or "zep"
-if BACKEND not in ("zep", "own"):
-    print(f"ZEP_MCP_BACKEND must be 'zep' or 'own', not {BACKEND!r}", file=sys.stderr)
+if BACKEND not in ("zep", "own", "local"):
+    print(f"ZEP_MCP_BACKEND must be 'zep', 'own' or 'local', not {BACKEND!r}", file=sys.stderr)
     sys.exit(1)
 
 DEFAULT_USER_ID = os.environ.get("ZEP_USER_ID", "default")
@@ -33,7 +37,7 @@ DEFAULT_USER_ID = os.environ.get("ZEP_USER_ID", "default")
 BAGGAGE_KEY = os.environ.get("ZEP_BAGGAGE_KEY", "userId")
 
 client = None  # the Zep client (zep backend)
-_store = None  # the own store (own backend), opened on first use
+_store = None  # the own or local store, opened on first use
 
 if BACKEND == "zep":
     from zep_cloud.client import Zep
@@ -44,20 +48,27 @@ if BACKEND == "zep":
         print("ZEP_API_KEY required", file=sys.stderr)
         sys.exit(1)
     client = Zep(api_key=api_key)
-else:
+elif BACKEND == "own":
     missing = [k for k in ("MEMORY_DATABASE_URL", "VOYAGE_API_KEY") if not os.environ.get(k)]
     if missing:
         print(f"ZEP_MCP_BACKEND=own requires {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
+elif not (os.environ.get("MEMORY_VERTEX_PROJECT") or os.environ.get("GOOGLE_CLOUD_PROJECT")):
+    print("ZEP_MCP_BACKEND=local requires MEMORY_VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT", file=sys.stderr)
+    sys.exit(1)
 
 
 def own_store():
-    """The own backend's store, connected lazily (startup stays instant).
+    """The own or local backend's store, connected lazily (startup stays instant).
 
     Not named `store`: importing the submodule zep_mcp.store rebinds that
     name on this package, and the second call would hit a module.
     """
     global _store
+    if _store is None and BACKEND == "local":
+        from zep_mcp.local_store import LocalStore
+
+        _store = LocalStore.from_env()
     if _store is None:
         from zep_mcp.store import Store
 
@@ -185,8 +196,8 @@ else:
     """ + SOURCE_DOC
     SEARCH_DOC = """Search memory for facts relevant to a query.
 
-    Returns facts ranked by reranker relevance, with near-duplicate
-    phrasings of a fact already returned left out. Each result has a
+    Returns facts ranked by relevance, with near-duplicate phrasings of
+    a fact already returned left out. Each result has a
     relevance score [0,1] for thresholding, the date it was saved
     (created_at) and, when known, the date it became true (valid_from).
     Use this for targeted recall about specific topics.
@@ -201,7 +212,7 @@ else:
 
 @mcp.tool(description=ADD_DOC)
 def add_memory(content: str, source: str = "") -> str:
-    if BACKEND == "own":
+    if BACKEND in ("own", "local"):
         mid = own_store().add(current_user_id(), content, source)
         return f"Stored (memory {mid})"
     graph = _graph_uuid(current_user_id())
@@ -221,7 +232,7 @@ def add_memory(content: str, source: str = "") -> str:
 @mcp.tool(description=SEARCH_DOC)
 def search_memory(query: str, limit: int = 5) -> str:
     limit = max(1, min(limit, 50))
-    if BACKEND == "own":
+    if BACKEND in ("own", "local"):
         items = own_store().search(current_user_id(), query, limit=limit)
         return json.dumps(items) if items else "[]"
     # A pager: .items is the first page, which with page_size=N is the top N.
@@ -252,7 +263,7 @@ def search_memory(query: str, limit: int = 5) -> str:
 
 @mcp.tool(description=LIST_DOC)
 def list_memory(limit: int = 50) -> str:
-    if BACKEND == "own":
+    if BACKEND in ("own", "local"):
         rows = own_store().list(current_user_id(), limit=max(1, min(limit, 100)))
         if not rows:
             return "No memories stored yet."
